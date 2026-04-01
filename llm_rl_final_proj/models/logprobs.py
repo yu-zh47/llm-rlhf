@@ -19,7 +19,10 @@ def compute_per_token_logprobs(
         output = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
         logits = output.logits[:, :-1, :]
         targets = input_ids[:, 1:]
-        return -F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none').view(input_ids.size(0), -1)
+        flat_logits = logits.reshape(-1, logits.size(-1))
+        flat_targets = targets.reshape(-1)
+        per_token_losses = F.cross_entropy(flat_logits, flat_targets, reduction='none')
+        return -per_token_losses.reshape(input_ids.size(0), -1)
     
 
 def build_completion_mask(

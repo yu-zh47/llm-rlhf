@@ -45,10 +45,13 @@ def iter_minibatches(
     N = batch.input_ids.size(0)
     indices = torch.arange(N)
     if shuffle:
-        indices = indices[torch.randperm(N, generator=generator)]
+        perm_device = generator.device if generator is not None else indices.device
+        perm = torch.randperm(N, generator=generator, device=perm_device).cpu()
+        indices = indices[perm]
     for start in range(0, N, minibatch_size):
         end = start + minibatch_size
         mb_indices = indices[start:end]
+        mb_index_list = mb_indices.tolist()
         mb = RolloutBatch(
             input_ids=batch.input_ids[mb_indices],
             attention_mask=batch.attention_mask[mb_indices],
@@ -57,8 +60,8 @@ def iter_minibatches(
             ref_logprobs=batch.ref_logprobs[mb_indices],
             rewards=batch.rewards[mb_indices],
             advantages=batch.advantages[mb_indices],
-            task_names=[batch.task_names[i] for i in mb_indices] if batch.task_names is not None else None,
-            completion_texts=[batch.completion_texts[i] for i in mb_indices] if batch.completion_texts is not None else None,
+            task_names=[batch.task_names[i] for i in mb_index_list] if batch.task_names is not None else None,
+            completion_texts=[batch.completion_texts[i] for i in mb_index_list] if batch.completion_texts is not None else None,
         )
         if device is not None:
             mb = mb.to(device)
