@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import torch
+from tqdm import tqdm
 
 from llm_rl_final_proj.data.ultrafeedback import GenerationExample, build_generation_examples, dataset_overview
 from llm_rl_final_proj.models.load import (
@@ -523,7 +524,8 @@ def main() -> None:
     run_eval(step=0, phase="baseline")
 
     start_time = time.time()
-    for step in range(1, cfg.steps + 1):
+    progress = tqdm(range(1, cfg.steps + 1), desc=f"train[{cfg.algo}]", dynamic_ncols=True)
+    for step in progress:
         maybe_update_warmup_lr(optimizer, cfg.lr, step - 1, cfg.warmup_steps)
         prompt_batch = _sample_prompt_batch(train_examples, cfg.batch_size, rng)
         rollout = sampler.rollout(
@@ -604,6 +606,13 @@ def main() -> None:
             **get_cuda_memory_metrics(prefix="train"),
         }
         logger.log(log_metrics, step=step)
+        progress.set_postfix(
+            reward=f"{log_metrics['rollout/reward_model_score_mean']:.3f}",
+            kl=f"{log_metrics.get('train/approximate_kl_divergence_policy_vs_reference_mean_over_minibatches', 0):.4f}",
+            loss=f"{log_metrics.get('train/policy_loss_with_kl_penalty_mean_over_minibatches', 0):.3f}",
+            entropy=f"{log_metrics.get('train/policy_token_entropy_mean_over_minibatches', 0):.2f}",
+            lr=f"{log_metrics['train/learning_rate']:.2e}",
+        )
 
         should_eval = (step % cfg.eval_interval == 0) or (step == cfg.steps)
         should_save = (step % cfg.save_interval == 0) or (step == cfg.steps)
@@ -614,6 +623,7 @@ def main() -> None:
             print(f"[checkpoint] saving step={step}")
             save_checkpoint(policy_model, cfg, step=step)
 
+    progress.close()
     logger.finish()
 
 

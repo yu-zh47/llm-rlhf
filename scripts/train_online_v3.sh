@@ -1,0 +1,30 @@
+uv run --extra remote python scripts/train.py --gpu 4 rm_grpo_train -- \
+  --algo grpo \
+  --model_name Qwen/Qwen2.5-1.5B-Instruct \
+  --dataset_name dataset/wildchat_min4_judged_5k_v1 \
+  --train_split train_gen \
+  --eval_split test_gen \
+  --reward_model_name Qwen/Qwen2.5-1.5B-Instruct \
+  --reward_adapter_path /usr/yue/llm-rlhf/runs/wildchat_min4_judged_5k_reward_model_v1/checkpoints/step_000300/adapter \
+  --output_dir ./runs/grpo-rm000300-lr8e-6-ppo_epoch2-kl003-gs8 \
+  --steps 80 \
+  --batch_size 16 \
+  --group_size 8 \
+  --min_new_tokens 32 \
+  --max_new_tokens 256 \
+  --temperature 0.8 \
+  --top_p 0.95 \
+  --lr 8e-6 \
+  --grad_accum_steps 2 \
+  --ppo_epochs 2 \
+  --minibatch_size 8 \
+  --clip_eps 0.2 \
+  --kl_coef 0.03 \
+  --max_prompt_tokens 700 \
+  --max_response_tokens 256 \
+  --eval_limit 32 \
+  --eval_interval 10 \
+  --save_interval 10 \
+  --wandb_enabled \
+  --wandb_project llm-rl-final-project \
+  --wandb_name grpo-rm000300-lr8e-6-ppo_epoch2-kl003-gs8
