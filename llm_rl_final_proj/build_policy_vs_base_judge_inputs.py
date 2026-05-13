@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--adapter_path", type=str, required=True)
     ap.add_argument("--generation_limit", type=int, default=128)
     ap.add_argument("--per_device_eval_batch_size", type=int, default=8)
-    ap.add_argument("--max_prompt_tokens", type=int, default=512)
+    ap.add_argument("--max_prompt_tokens", type=int, default=700)
     ap.add_argument("--max_new_tokens", type=int, default=256)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top_p", type=float, default=1.0)

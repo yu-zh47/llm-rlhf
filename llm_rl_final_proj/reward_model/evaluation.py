@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from llm_rl_final_proj.data.ultrafeedback import PreferenceExample
+from llm_rl_final_proj.models.load import RewardModel
 from llm_rl_final_proj.reward_model.batch import RewardPairCollator, RewardScoringCollator
 
 
@@ -49,7 +50,7 @@ def aggregate_reward_scores(
     raise ValueError(f"Unsupported reward aggregation mode: {mode!r} (allowed: {REWARD_AGGREGATIONS})")
 
 
-def reward_model_scores(model: torch.nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+def reward_model_scores(model: RewardModel, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
     outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
     logits = outputs.logits
     if logits.ndim == 2 and logits.shape[-1] == 1:
@@ -61,7 +62,7 @@ def reward_model_scores(model: torch.nn.Module, input_ids: torch.Tensor, attenti
 
 @torch.no_grad()
 def evaluate_reward_model_dataset(
-    model: torch.nn.Module,
+    model: RewardModel,
     tokenizer,
     examples: Sequence[PreferenceExample],
     *,
@@ -120,7 +121,7 @@ def evaluate_reward_model_dataset(
 
 @torch.no_grad()
 def score_prompt_response_pairs(
-    model: torch.nn.Module,
+    model: RewardModel,
     tokenizer,
     rows: Sequence[Dict[str, object]],
     *,

@@ -19,8 +19,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--adapter_path", type=str, default=None)
     ap.add_argument("--eval_limit", type=int, default=512)
     ap.add_argument("--per_device_eval_batch_size", type=int, default=8)
-    ap.add_argument("--max_prompt_tokens", type=int, default=512)
-    ap.add_argument("--max_response_tokens", type=int, default=256)
+    ap.add_argument("--max_prompt_tokens", type=int, default=700)
+    ap.add_argument("--max_response_tokens", type=int, default=512)
     ap.add_argument("--save_json", type=str, default=None)
     return ap.parse_args()
 

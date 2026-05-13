@@ -53,8 +53,8 @@ class RewardModelConfig:
     warmup_steps: int = 100
     max_grad_norm: float = 1.0
 
-    max_prompt_tokens: int = 512
-    max_response_tokens: int = 256
+    max_prompt_tokens: int = 700
+    max_response_tokens: int = 512
 
     train_limit: int = 0
     eval_limit: int = 512

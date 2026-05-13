@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from llm_rl_final_proj.models.load import PolicyModel
 from llm_rl_final_proj.rollout.rollout_buffer import RolloutBatch
 
 
@@ -36,7 +37,7 @@ class RLAlgorithm:
 
     def update(
         self,
-        model: torch.nn.Module,
+        model: PolicyModel,
         optimizer: torch.optim.Optimizer,
         rollout: RolloutBatch,
         grad_accum_steps: int = 1,

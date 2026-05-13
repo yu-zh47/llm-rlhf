@@ -4,9 +4,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import torch
-from transformers.generation import GenerationConfig
 
-from llm_rl_final_proj.models.load import tokenize_chat_prompts
+from llm_rl_final_proj.models.load import PolicyModel, tokenize_chat_prompts
 from llm_rl_final_proj.models.logprobs import build_completion_mask, compute_per_token_logprobs
 from llm_rl_final_proj.rollout.sampler_base import RolloutOutput, Sampler
 
@@ -30,7 +29,7 @@ class HFSampler(Sampler):
     @torch.no_grad()
     def rollout(
         self,
-        policy_model: torch.nn.Module,
+        policy_model: PolicyModel,
         prompt_messages: List[List[Dict[str, str]]],
         task_names: List[str],
         task_metas: List[Dict[str, Any]],
@@ -70,8 +69,6 @@ class HFSampler(Sampler):
             gen_kwargs["top_p"] = sampling.top_p
             if sampling.top_k > 0:
                 gen_kwargs["top_k"] = sampling.top_k
-        gen_cfg = GenerationConfig(**gen_kwargs)
-
         was_training = bool(policy_model.training)
         had_gc = bool(getattr(policy_model, "is_gradient_checkpointing", False))
         if had_gc and hasattr(policy_model, "gradient_checkpointing_disable"):
@@ -89,8 +86,7 @@ class HFSampler(Sampler):
             sequences = policy_model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                generation_config=gen_cfg,
-                use_cache=True,
+                **gen_kwargs,
             )
             full_attention = (sequences != pad_id).long()
             completion_ids = sequences[:, prompt_input_len:]

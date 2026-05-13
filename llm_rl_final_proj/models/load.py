@@ -6,12 +6,22 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
+
+
+PolicyModel = PeftModel | PreTrainedModel
+RewardModel = PeftModel | PreTrainedModel
 
 
 @dataclass
 class LoadedPolicyModel:
-    model: torch.nn.Module
+    model: PolicyModel
     tokenizer: PreTrainedTokenizerBase
     trainable_params: int
     total_params: int
@@ -20,13 +30,13 @@ class LoadedPolicyModel:
 
 @dataclass
 class LoadedInferenceModel:
-    model: torch.nn.Module
+    model: PolicyModel
     tokenizer: PreTrainedTokenizerBase
 
 
 @dataclass
 class LoadedRewardModel:
-    model: torch.nn.Module
+    model: RewardModel
     tokenizer: PreTrainedTokenizerBase
     trainable_params: int
     total_params: int
@@ -50,6 +60,16 @@ class LoadedRewardEnsemble:
 
 def _build_model_kwargs(dtype: torch.dtype) -> Dict[str, Any]:
     return {"dtype": dtype}
+
+
+def _reset_generation_sampling_defaults(model: torch.nn.Module) -> None:
+    generation_config = getattr(model, "generation_config", None)
+    if generation_config is None:
+        return
+    generation_config.do_sample = False
+    generation_config.temperature = 1.0
+    generation_config.top_p = 1.0
+    generation_config.top_k = 50
 
 
 def _prepare_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
@@ -153,6 +173,7 @@ def load_lora_policy_model_and_tokenizer(
         model_name,
         **_build_model_kwargs(dtype=dtype),
     )
+    _reset_generation_sampling_defaults(base)
     if grad_checkpointing:
         base.gradient_checkpointing_enable()
         _ensure_input_require_grads(base)
@@ -170,6 +191,7 @@ def load_lora_policy_model_and_tokenizer(
         bias=lora_bias,
     )
     model = get_peft_model(base, lora_cfg)
+    _reset_generation_sampling_defaults(model)
     model.to(device)
 
     if grad_checkpointing:
@@ -211,10 +233,12 @@ def load_inference_model_and_tokenizer(
         model_name,
         **_build_model_kwargs(dtype=dtype),
     )
+    _reset_generation_sampling_defaults(base)
     if adapter_path is not None:
         model = PeftModel.from_pretrained(base, adapter_path, is_trainable=False)
     else:
         model = base
+    _reset_generation_sampling_defaults(model)
     model.to(device)
     model.eval()
     return LoadedInferenceModel(model=model, tokenizer=tokenizer)

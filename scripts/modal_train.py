@@ -26,20 +26,42 @@ def load_gitignore_patterns() -> list[str]:
         return []
     root = Path(__file__).resolve().parents[1]
     gitignore_path = root / ".gitignore"
-    if not gitignore_path.is_file():
-        return []
+    raw_entries = [
+        ".git/",
+        ".venv/",
+        "__pycache__/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        "run_logs/",
+        "eval_candidates/",
+        "tmp_modal_configs/",
+        "tmp_modal_metrics/",
+        "tmp_remote_summaries/",
+        "llm_rl_final_proj_public_submission/",
+        "*.pyc",
+        "*.zip",
+        ".DS_Store",
+    ]
+    if gitignore_path.is_file():
+        for line in gitignore_path.read_text(encoding="utf-8").splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#") or entry.startswith("!"):
+                continue
+            raw_entries.append(entry)
+
     patterns: list[str] = []
-    for line in gitignore_path.read_text(encoding="utf-8").splitlines():
-        entry = line.strip()
-        if not entry or entry.startswith("#") or entry.startswith("!"):
-            continue
+    for entry in raw_entries:
         entry = entry.lstrip("/")
         if entry.endswith("/"):
             entry = entry.rstrip("/")
-            patterns.append(f"**/{entry}/**")
+            patterns.extend([f"{entry}/**", f"**/{entry}/**"])
+        elif "/" in entry:
+            patterns.extend([entry, f"{entry}/**"])
         else:
-            patterns.append(f"**/{entry}")
-    return patterns
+            patterns.extend([entry, f"**/{entry}"])
+    patterns.extend([".git/**", "**/.git/**"])
+    return sorted(set(patterns))
 
 
 def _to_volume_path(path_value: str) -> str:

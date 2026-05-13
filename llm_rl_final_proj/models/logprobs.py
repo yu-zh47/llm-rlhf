@@ -3,9 +3,11 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from llm_rl_final_proj.models.load import PolicyModel
+
 
 def compute_per_token_logprobs(
-    model: torch.nn.Module,
+    model: PolicyModel,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     *,

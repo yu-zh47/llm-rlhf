@@ -9,14 +9,14 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from llm_rl_final_proj.data.ultrafeedback import GenerationExample, PreferenceExample, build_generation_examples
-from llm_rl_final_proj.models.load import tokenize_chat_prompts
+from llm_rl_final_proj.models.load import PolicyModel, tokenize_chat_prompts
 from llm_rl_final_proj.offline.batch import PreferenceCollator
 from llm_rl_final_proj.offline.losses import compute_policy_and_reference_scores
 
 
 @torch.no_grad()
 def evaluate_preference_dataset(
-    model: torch.nn.Module,
+    model: PolicyModel,
     tokenizer,
     examples: Sequence[PreferenceExample],
     *,
@@ -90,7 +90,7 @@ def evaluate_preference_dataset(
 
 @torch.no_grad()
 def generate_samples(
-    model: torch.nn.Module,
+    model: PolicyModel,
     tokenizer,
     examples: Sequence[GenerationExample],
     *,

@@ -5,6 +5,7 @@ from typing import Dict
 
 import torch
 
+from llm_rl_final_proj.models.load import PolicyModel
 from llm_rl_final_proj.models.logprobs import (
     approx_kl_from_logprobs,
     compute_per_token_logprobs,
@@ -24,7 +25,7 @@ class DrGRPO(RLAlgorithm):
 
     def update(
         self,
-        model: torch.nn.Module,
+        model: PolicyModel,
         optimizer: torch.optim.Optimizer,
         rollout: RolloutBatch,
         grad_accum_steps: int = 1,
