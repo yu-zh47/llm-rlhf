@@ -15,10 +15,13 @@ from tqdm import tqdm
 from llm_rl_final_proj.data.ultrafeedback import GenerationExample, build_generation_examples, dataset_overview
 from llm_rl_final_proj.models.load import (
     load_lora_policy_model_and_tokenizer,
-    load_reward_model_and_tokenizer,
+    load_reward_model_ensemble_and_tokenizer,
 )
 from llm_rl_final_proj.offline.evaluation import generate_samples, summarize_generation_rows
-from llm_rl_final_proj.reward_model.evaluation import score_prompt_response_pairs
+from llm_rl_final_proj.reward_model.evaluation import (
+    REWARD_AGGREGATIONS,
+    score_prompt_response_pairs_ensemble,
+)
 from llm_rl_final_proj.rl.base import AlgoConfig
 from llm_rl_final_proj.rl.dr_grpo import DrGRPO
 from llm_rl_final_proj.rl.gspo import GSPO
@@ -40,9 +43,12 @@ from llm_rl_final_proj.utils.wandb_utils import WandBLogger
 @dataclass
 class OnlineRMGRPOConfig:
     algo: str = "grpo"
+    baseline: str = "group_mean" # group_mean | rloo | rank | remax
     model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
     reward_model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    reward_adapter_path: str = ""
+    reward_adapter_path: str = ""  # comma-separated list of adapter dirs (>=1 entry)
+    reward_aggregation: str = "mean"  # mean | min | median | mean_minus_std (used iff >=2 RMs)
+    reward_uncertainty_coef: float = 1.0  # only consulted by mean_minus_std
     dataset_name: str = "HuggingFaceH4/ultrafeedback_binarized"
     train_split: str = "train_gen"
     eval_split: str = "test_gen"
@@ -112,7 +118,25 @@ def parse_args() -> OnlineRMGRPOConfig:
     )
     ap.add_argument("--model_name", type=str, default=OnlineRMGRPOConfig.model_name)
     ap.add_argument("--reward_model_name", type=str, default=OnlineRMGRPOConfig.reward_model_name)
-    ap.add_argument("--reward_adapter_path", type=str, required=True)
+    ap.add_argument(
+        "--reward_adapter_path",
+        type=str,
+        required=True,
+        help="Reward-model adapter dir, or comma-separated list of dirs to ensemble (e.g. 'a,b,c').",
+    )
+    ap.add_argument(
+        "--reward_aggregation",
+        type=str,
+        default=OnlineRMGRPOConfig.reward_aggregation,
+        choices=list(REWARD_AGGREGATIONS),
+        help="Aggregation across the reward-model ensemble. Ignored if only one adapter is given.",
+    )
+    ap.add_argument(
+        "--reward_uncertainty_coef",
+        type=float,
+        default=OnlineRMGRPOConfig.reward_uncertainty_coef,
+        help="Coefficient on cross-model std for the mean_minus_std aggregator.",
+    )
     ap.add_argument("--dataset_name", type=str, default=OnlineRMGRPOConfig.dataset_name)
     ap.add_argument("--train_split", type=str, default=OnlineRMGRPOConfig.train_split)
     ap.add_argument("--eval_split", type=str, default=OnlineRMGRPOConfig.eval_split)
@@ -195,6 +219,13 @@ def _normalize_lora_target_modules(raw: str) -> List[str]:
     return [x.strip() for x in raw.split(",") if x.strip()]
 
 
+def _parse_reward_adapter_paths(raw: str) -> List[str]:
+    paths = [p.strip() for p in raw.split(",") if p.strip()]
+    if not paths:
+        raise ValueError("--reward_adapter_path produced an empty list after parsing")
+    return paths
+
+
 def _sample_prompt_batch(examples: Sequence[GenerationExample], batch_size: int, rng: random.Random) -> List[GenerationExample]:
     if not examples:
         raise RuntimeError("Cannot sample prompts from an empty generation split.")
@@ -207,6 +238,7 @@ def _compute_group_advantages(
     eps: float = 1e-6,
     *,
     divide_by_std: bool,
+    baseline: str = "group_mean", # group_mean | rloo | rank | remax
 ) -> torch.Tensor:
     # TODO(student): compute one scalar advantage per sampled completion by grouping rewards
     # into prompt-wise batches of size `group_size`, subtracting the group mean, and optionally
@@ -214,13 +246,24 @@ def _compute_group_advantages(
     if group_size <= 1 or rewards.numel() % group_size != 0:
         return torch.zeros_like(rewards)
     rewards = rewards.view(-1, group_size)
-    mean = torch.mean(rewards, dim=1, keepdim=True)
-    std = torch.std(rewards, dim=1, correction=0, keepdim=True)
-    safe = std > eps
-    if divide_by_std:
-        advantage = torch.where(safe, (rewards - mean) / (std + eps), torch.zeros_like(rewards))
+    if baseline == "group_mean":
+        advantage = rewards - rewards.mean(dim=1, keepdim=True)
+    elif baseline == "rloo":
+        advantage = rewards - (rewards.sum(dim=1, keepdim=True) - rewards) / (group_size - 1)
+    elif baseline == "rank":
+        ranks = torch.argsort(torch.argsort(rewards, dim=1), dim=1).float()
+        advantage = ranks / (group_size - 1) - 0.5
+    elif baseline == "remax":
+        maxs = torch.max(rewards, dim=1, keepdim=True).values
+        advantage = rewards - maxs
     else:
-        advantage = rewards - mean
+        raise ValueError(f"Unsupported baseline {baseline}")
+
+    if divide_by_std and baseline != "rank":  # rank-based advantages are already normalized and shouldn't be divided by std
+        std = torch.std(rewards, dim=1, correction=0, keepdim=True)
+        safe = std > eps
+        advantage = torch.where(safe, advantage / std, advantage)
+
     return advantage.view(-1)
 
 def _build_online_algo(cfg: OnlineRMGRPOConfig):
@@ -297,6 +340,9 @@ def save_checkpoint(model: torch.nn.Module, cfg: OnlineRMGRPOConfig, step: int) 
         "model_name": cfg.model_name,
         "reward_model_name": cfg.reward_model_name,
         "reward_adapter_path": cfg.reward_adapter_path,
+        "reward_adapter_paths": _parse_reward_adapter_paths(cfg.reward_adapter_path),
+        "reward_aggregation": cfg.reward_aggregation,
+        "reward_uncertainty_coef": cfg.reward_uncertainty_coef,
         "dataset_name": cfg.dataset_name,
         "train_split": cfg.train_split,
         "eval_split": cfg.eval_split,
@@ -319,7 +365,18 @@ def evaluate_policy_with_reward_model(
     temperature: float,
     top_p: float,
     generation_batch_size: int,
+    reward_adapter_names: Sequence[str] | None = None,
+    reward_aggregation: str = "mean",
+    reward_uncertainty_coef: float = 1.0,
 ) -> tuple[Dict[str, float], List[Dict[str, Any]], List[float]]:
+    """Evaluate `policy_model` against a (possibly ensembled) reward model.
+
+    If `reward_adapter_names` is provided, `reward_model` must be a PEFT model with
+    those adapter names loaded; we score with each one and aggregate via
+    `reward_aggregation`. With a single adapter the aggregator is a no-op.
+    Backwards-compatible with the older single-RM call site (defaults: pretend the
+    active adapter is the only model).
+    """
     rows = generate_samples(
         policy_model,
         policy_tokenizer,
@@ -355,33 +412,112 @@ def evaluate_policy_with_reward_model(
             )
         else:
             has_reference = False
-    rm_scores = score_prompt_response_pairs(
+
+    adapter_names_list = list(reward_adapter_names) if reward_adapter_names else []
+    if not adapter_names_list:
+        # Legacy single-RM path: caller passed a plain reward model with whichever
+        # adapter is already active. Don't try to switch adapters.
+        from llm_rl_final_proj.reward_model.evaluation import score_prompt_response_pairs
+        rm_scores = score_prompt_response_pairs(
+            reward_model,
+            reward_tokenizer,
+            scoring_rows,
+            max_prompt_tokens=max_prompt_tokens,
+            max_response_tokens=max_response_tokens,
+            per_device_batch_size=generation_batch_size,
+            device=device,
+        )
+        per_model_scores = torch.tensor(rm_scores, dtype=torch.float32).unsqueeze(0)
+        ref_scores: List[float] | None = None
+        per_model_ref: torch.Tensor | None = None
+        if has_reference and reference_rows:
+            ref_scores = score_prompt_response_pairs(
+                reward_model,
+                reward_tokenizer,
+                reference_rows,
+                max_prompt_tokens=max_prompt_tokens,
+                max_response_tokens=max_response_tokens,
+                per_device_batch_size=generation_batch_size,
+                device=device,
+            )
+            per_model_ref = torch.tensor(ref_scores, dtype=torch.float32).unsqueeze(0)
+        return _finalize_eval_metrics(
+            rows,
+            metrics,
+            rm_scores,
+            per_model_scores,
+            ref_scores,
+            per_model_ref,
+            adapter_names=["legacy"],
+        )
+
+    rm_scores, per_model_scores = score_prompt_response_pairs_ensemble(
         reward_model,
+        adapter_names_list,
         reward_tokenizer,
         scoring_rows,
         max_prompt_tokens=max_prompt_tokens,
         max_response_tokens=max_response_tokens,
         per_device_batch_size=generation_batch_size,
         device=device,
+        aggregation=reward_aggregation,
+        uncertainty_coef=reward_uncertainty_coef,
     )
-    score_tensor = torch.tensor(rm_scores, dtype=torch.float32)
-    metrics["eval/rm_score_mean_on_policy_generations"] = float(score_tensor.mean().item())
-    metrics["eval/rm_score_std_on_policy_generations"] = float(score_tensor.std(unbiased=False).item())
+    ref_scores = None
+    per_model_ref = None
     if has_reference and reference_rows:
-        ref_scores = score_prompt_response_pairs(
+        ref_scores, per_model_ref = score_prompt_response_pairs_ensemble(
             reward_model,
+            adapter_names_list,
             reward_tokenizer,
             reference_rows,
             max_prompt_tokens=max_prompt_tokens,
             max_response_tokens=max_response_tokens,
             per_device_batch_size=generation_batch_size,
             device=device,
+            aggregation=reward_aggregation,
+            uncertainty_coef=reward_uncertainty_coef,
         )
+    return _finalize_eval_metrics(
+        rows,
+        metrics,
+        rm_scores,
+        per_model_scores,
+        ref_scores,
+        per_model_ref,
+        adapter_names=adapter_names_list,
+    )
+
+
+def _finalize_eval_metrics(
+    rows: List[Dict[str, Any]],
+    metrics: Dict[str, float],
+    rm_scores: List[float],
+    per_model_scores: torch.Tensor,
+    ref_scores: List[float] | None,
+    per_model_ref: torch.Tensor | None,
+    *,
+    adapter_names: Sequence[str],
+) -> tuple[Dict[str, float], List[Dict[str, Any]], List[float]]:
+    score_tensor = torch.tensor(rm_scores, dtype=torch.float32)
+    metrics["eval/rm_score_mean_on_policy_generations"] = float(score_tensor.mean().item())
+    metrics["eval/rm_score_std_on_policy_generations"] = float(score_tensor.std(unbiased=False).item())
+    if per_model_scores.shape[0] >= 2:
+        # Disagreement diagnostics: how spread out are the per-RM scores per example?
+        cross_std = per_model_scores.std(dim=0, unbiased=False)
+        metrics["eval/rm_ensemble_disagreement_mean"] = float(cross_std.mean().item())
+        metrics["eval/rm_ensemble_disagreement_max"] = float(cross_std.max().item())
+        for k, name in enumerate(adapter_names):
+            metrics[f"eval/rm_score_mean_per_model/{name}"] = float(per_model_scores[k].mean().item())
+    if ref_scores is not None:
         ref_tensor = torch.tensor(ref_scores, dtype=torch.float32)
         margin = score_tensor - ref_tensor
         metrics["eval/rm_reference_score_mean_on_dataset_reference_responses"] = float(ref_tensor.mean().item())
         metrics["eval/rm_fraction_policy_scores_above_reference"] = float((margin > 0).float().mean().item())
         metrics["eval/rm_margin_policy_minus_reference_mean"] = float(margin.mean().item())
+        if per_model_ref is not None and per_model_ref.shape[0] >= 2:
+            cross_std_ref = per_model_ref.std(dim=0, unbiased=False)
+            metrics["eval/rm_ensemble_disagreement_on_reference_mean"] = float(cross_std_ref.mean().item())
     return metrics, rows, rm_scores
 
 
@@ -397,6 +533,11 @@ def main() -> None:
         raise ValueError(f"--group_size must be >= 1, got {cfg.group_size}")
     if not cfg.reward_adapter_path:
         raise ValueError("--reward_adapter_path is required")
+    reward_adapter_paths = _parse_reward_adapter_paths(cfg.reward_adapter_path)
+    if cfg.reward_aggregation not in REWARD_AGGREGATIONS:
+        raise ValueError(
+            f"--reward_aggregation must be one of {REWARD_AGGREGATIONS}, got {cfg.reward_aggregation!r}"
+        )
 
     if cfg.wandb_name == OnlineRMGRPOConfig.wandb_name and cfg.algo != OnlineRMGRPOConfig.algo:
         cfg.wandb_name = f"rm_{cfg.algo}"
@@ -440,17 +581,22 @@ def main() -> None:
     policy_model = loaded_policy.model
     policy_tokenizer = loaded_policy.tokenizer
 
-    loaded_reward = load_reward_model_and_tokenizer(
+    loaded_reward = load_reward_model_ensemble_and_tokenizer(
         cfg.reward_model_name,
+        reward_adapter_paths,
         device=device,
         dtype=dtype,
-        adapter_path=cfg.reward_adapter_path,
     )
     reward_model = loaded_reward.model
     reward_tokenizer = loaded_reward.tokenizer
-    reward_model.eval()
-    for p in reward_model.parameters():
-        p.requires_grad_(False)
+    reward_adapter_names = loaded_reward.adapter_names
+    print(
+        f"[setup] reward ensemble: {len(reward_adapter_names)} adapter(s) "
+        f"aggregation={cfg.reward_aggregation}"
+        + (f" coef={cfg.reward_uncertainty_coef}" if cfg.reward_aggregation == "mean_minus_std" else "")
+    )
+    for name, path in zip(reward_adapter_names, reward_adapter_paths):
+        print(f"  - {name}: {path}")
 
     optimizer = torch.optim.AdamW(
         [p for p in policy_model.parameters() if p.requires_grad],
@@ -505,6 +651,9 @@ def main() -> None:
             temperature=cfg.eval_temperature,
             top_p=cfg.eval_top_p,
             generation_batch_size=cfg.eval_batch_size,
+            reward_adapter_names=reward_adapter_names,
+            reward_aggregation=cfg.reward_aggregation,
+            reward_uncertainty_coef=cfg.reward_uncertainty_coef,
         )
         logger.log(metrics, step=step)
         logger.log_table(
@@ -557,20 +706,24 @@ def main() -> None:
                     "response_text": _normalize_completion_for_reward_scoring(completion_text),
                 }
             )
-        reward_scores = score_prompt_response_pairs(
+        reward_scores, per_model_rewards = score_prompt_response_pairs_ensemble(
             reward_model,
+            reward_adapter_names,
             reward_tokenizer,
             reward_rows,
             max_prompt_tokens=cfg.max_prompt_tokens,
             max_response_tokens=cfg.max_response_tokens,
             per_device_batch_size=cfg.reward_batch_size,
             device=device,
+            aggregation=cfg.reward_aggregation,
+            uncertainty_coef=cfg.reward_uncertainty_coef,
         )
         rewards = torch.tensor(reward_scores, device=device, dtype=torch.float32)
         advantages = _compute_group_advantages(
             rewards,
             cfg.group_size,
             divide_by_std=_algo_divides_advantages_by_std(cfg.algo),
+            baseline=cfg.baseline,
         )
         batch = RolloutBatch(
             input_ids=rollout.input_ids,
@@ -605,6 +758,14 @@ def main() -> None:
             **train_metrics,
             **get_cuda_memory_metrics(prefix="train"),
         }
+        if per_model_rewards.shape[0] >= 2:
+            cross_std = per_model_rewards.std(dim=0, unbiased=False)
+            log_metrics["rollout/rm_ensemble_disagreement_mean"] = float(cross_std.mean().item())
+            log_metrics["rollout/rm_ensemble_disagreement_max"] = float(cross_std.max().item())
+            for k, name in enumerate(reward_adapter_names):
+                log_metrics[f"rollout/rm_score_mean_per_model/{name}"] = float(
+                    per_model_rewards[k].mean().item()
+                )
         logger.log(log_metrics, step=step)
         progress.set_postfix(
             reward=f"{log_metrics['rollout/reward_model_score_mean']:.3f}",

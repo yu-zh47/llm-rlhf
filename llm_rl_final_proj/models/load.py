@@ -34,6 +34,20 @@ class LoadedRewardModel:
     modules_to_save: List[str]
 
 
+@dataclass
+class LoadedRewardEnsemble:
+    """A single PEFT model with N reward-model LoRA adapters loaded side-by-side.
+
+    `adapter_names[i]` activates the i-th reward-model checkpoint (LoRA + score head)
+    when passed to `model.set_adapter(name)`.
+    """
+
+    model: torch.nn.Module
+    tokenizer: PreTrainedTokenizerBase
+    adapter_names: List[str]
+    adapter_paths: List[str]
+
+
 def _build_model_kwargs(dtype: torch.dtype) -> Dict[str, Any]:
     return {"dtype": dtype}
 
@@ -298,6 +312,52 @@ def load_reward_model_and_tokenizer(
     model.to(device)
     model.eval()
     return LoadedInferenceModel(model=model, tokenizer=tokenizer)
+
+def load_reward_model_ensemble_and_tokenizer(
+    model_name: str,
+    adapter_paths: Sequence[str],
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.bfloat16,
+) -> LoadedRewardEnsemble:
+    """Load one frozen base RM + N LoRA adapters into a single PeftModel.
+
+    Each adapter brings its own LoRA weights and (via PEFT's modules_to_save) its own
+    classification head. Switch which checkpoint is active with `model.set_adapter(name)`.
+    """
+    if len(adapter_paths) == 0:
+        raise ValueError("load_reward_model_ensemble_and_tokenizer requires >=1 adapter path")
+    tokenizer = _prepare_tokenizer(model_name)
+    base = AutoModelForSequenceClassification.from_pretrained(
+        model_name,
+        num_labels=1,
+        **_build_model_kwargs(dtype=dtype),
+    )
+    if getattr(base.config, "pad_token_id", None) is None:
+        base.config.pad_token_id = tokenizer.pad_token_id
+
+    names: List[str] = []
+    first_path = str(adapter_paths[0])
+    name0 = "rm_0"
+    model = PeftModel.from_pretrained(base, first_path, adapter_name=name0, is_trainable=False)
+    names.append(name0)
+    for i, p in enumerate(adapter_paths[1:], start=1):
+        name = f"rm_{i}"
+        model.load_adapter(str(p), adapter_name=name, is_trainable=False)
+        names.append(name)
+
+    model.to(device)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    model.set_adapter(names[0])
+    return LoadedRewardEnsemble(
+        model=model,
+        tokenizer=tokenizer,
+        adapter_names=names,
+        adapter_paths=[str(p) for p in adapter_paths],
+    )
+
 
 def resolve_adapter_path(path: str) -> str:
     p = Path(path)

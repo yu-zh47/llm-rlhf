@@ -214,6 +214,13 @@ def _rm_grpo_train_entrypoint(*args: str) -> None:
     _run_subprocess_with_periodic_volume_commits(cmd)
 
 
+def _rm_online_pref_train_entrypoint(*args: str) -> None:
+    normalized_args = _normalize_args(args, default_output_dir="runs/rm_online_dpo_default")
+    _assert_wandb_credentials_available_if_needed(normalized_args)
+    cmd = ["python", "-u", "-m", "llm_rl_final_proj.online.train_rm_online_pref", *normalized_args]
+    _run_subprocess_with_periodic_volume_commits(cmd)
+
+
 def _eval_entrypoint(*args: str) -> None:
     normalized_args = _normalize_args(args)
     cmd = ["python", "-u", "-m", "llm_rl_final_proj.eval", *normalized_args]
@@ -309,6 +316,34 @@ def rm_grpo_train_remote(*args: str) -> None:
 )
 def rm_grpo_train_remote_h200(*args: str) -> None:
     _rm_grpo_train_entrypoint(*args)
+
+
+@app.function(
+    volumes={VOLUME_PATH: volume},
+    timeout=DEFAULT_TIMEOUT_SECONDS,
+    env=gpu_env,
+    image=image,
+    secrets=function_secrets,
+    gpu="H100",
+    cpu=DEFAULT_CPU,
+    memory=DEFAULT_MEMORY_MB,
+)
+def rm_online_pref_train_remote(*args: str) -> None:
+    _rm_online_pref_train_entrypoint(*args)
+
+
+@app.function(
+    volumes={VOLUME_PATH: volume},
+    timeout=DEFAULT_TIMEOUT_SECONDS,
+    env=gpu_env,
+    image=image,
+    secrets=function_secrets,
+    gpu="H200",
+    cpu=DEFAULT_CPU,
+    memory=DEFAULT_MEMORY_MB,
+)
+def rm_online_pref_train_remote_h200(*args: str) -> None:
+    _rm_online_pref_train_entrypoint(*args)
 
 
 @app.function(
